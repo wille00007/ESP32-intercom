@@ -184,7 +184,7 @@ void loop() {
     static unsigned long lastLog = 0;
     if (millis() - lastLog > 5000) {
         lastLog = millis();
-        Serial.print("[STATUS] System State: ");
+        Serial.print("[INFO] System State: ");
         if (isCallActive) Serial.println("IN_VOICE_CALL");
         else if (isMediaStreaming) Serial.println("STREAMING_MEDIA");
         else Serial.println("STANDBY_IDLE");
