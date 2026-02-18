@@ -5,6 +5,9 @@ A high-fidelity Bluetooth audio system using Dual-Profile handshaking (Music & C
 
 This project implements a dual-profile Bluetooth system on the ESP32, specifically optimized for iPhone integration. It enables high-quality music streaming via A2DP and seamless switching to duplex voice communication via HFP (Hands-Free Profile).
 
+Technical Implementation Summary
+"The system utilizes a state-driven event handler to manage the transition between Bluetooth A2DP and HFP profiles. By intercepting low-level protocol events (SCO/ACL), the firmware dynamically reconfigures the I2S hardware clock frequency in real-time. This ensures synchronization between the MCU's internal DAC/ADC and the iPhone's variable sample rates (switching from 44.1kHz stereo media to 16kHz mono wideband speech), effectively eliminating digital pitch-shift and latency jitter during profile handovers."
+
 By utilizing digital I2S communication, it bypasses the internal 8-bit DAC of the ESP32 to provide professional-grade audio fidelity for DIY helmet intercoms or hands-free systems.
 ✨ Key Features
 
@@ -70,9 +73,6 @@ The firmware provides real-time feedback via the Serial Monitor:
     [LATENCY]: Timing data for profile switching (measured in ms).
 
     [INFO]: Heartbeat monitor showing current active mode.
-
-    Technical Implementation Summary
-"The system utilizes a state-driven event handler to manage the transition between Bluetooth A2DP and HFP profiles. By intercepting low-level protocol events (SCO/ACL), the firmware dynamically reconfigures the I2S hardware clock frequency in real-time. This ensures synchronization between the MCU's internal DAC/ADC and the iPhone's variable sample rates (switching from 44.1kHz stereo media to 16kHz mono wideband speech), effectively eliminating digital pitch-shift and latency jitter during profile handovers."
 
 📄 License
 
