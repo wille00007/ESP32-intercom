@@ -71,6 +71,9 @@ The firmware provides real-time feedback via the Serial Monitor:
 
     [INFO]: Heartbeat monitor showing current active mode.
 
+    Technical Implementation Summary
+"The system utilizes a state-driven event handler to manage the transition between Bluetooth A2DP and HFP profiles. By intercepting low-level protocol events (SCO/ACL), the firmware dynamically reconfigures the I2S hardware clock frequency in real-time. This ensures synchronization between the MCU's internal DAC/ADC and the iPhone's variable sample rates (switching from 44.1kHz stereo media to 16kHz mono wideband speech), effectively eliminating digital pitch-shift and latency jitter during profile handovers."
+
 📄 License
 
 Distributed under the MIT License. See LICENSE for more information.
