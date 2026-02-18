@@ -1,0 +1,146 @@
+/* * -------------------------------------------------------------------------------
+ * PROJECT: Open-Source Pro-Intercom MCU System
+ * VERSION: 2.2.0 (Stable Build)
+ * DESCRIPTION: Dual-profile (A2DP & HFP) with robust Serial initialization.
+ * -------------------------------------------------------------------------------
+ */
+
+#include "BluetoothSerial.h"
+#include "esp_bt_main.h"
+#include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"
+#include "esp_a2dp_api.h"
+#include "esp_hf_client_api.h"
+#include "driver/i2s.h"
+
+BluetoothSerial SerialBT;
+
+// --- I2S PIN CONFIGURATION ---
+#define I2S_NUM           I2S_NUM_0
+#define I2S_BCK_IO        26
+#define I2S_WS_IO         25
+#define I2S_DO_IO         22  // Output to Speaker/DAC
+#define I2S_DI_IO         35  // Input from I2S Microphone
+
+// --- GLOBAL STATE ---
+bool isCallActive = false;
+bool isMediaStreaming = false;
+
+// --- AUDIO STREAM CALLBACKS ---
+
+void hf_incoming_data_cb(const uint8_t *data, uint32_t len) {
+    size_t bytes_written;
+    i2s_write(I2S_NUM, data, len, &bytes_written, portMAX_DELAY);
+}
+
+uint32_t hf_outgoing_data_cb(uint8_t *data, uint32_t len) {
+    size_t bytes_read = 0;
+    i2s_read(I2S_NUM, data, len, &bytes_read, portMAX_DELAY);
+    return (uint32_t)bytes_read;
+}
+
+void a2dp_sink_data_cb(const uint8_t *data, uint32_t len) {
+    size_t bytes_written;
+    i2s_write(I2S_NUM, data, len, &bytes_written, portMAX_DELAY);
+}
+
+// --- EVENT HANDLERS ---
+
+void hf_client_event_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *param) {
+    if (event == 0) { // Connection State
+        if (param->conn_stat.state == 1) Serial.println("[STATUS] HFP: Connected");
+    } 
+    else if (event == 2) { // Audio State
+        if (param->audio_stat.state == 2) {
+            isCallActive = true;
+            Serial.println("[EVENT] MODE: VOICE_CALL_ACTIVE");
+        } else {
+            isCallActive = false;
+            Serial.println("[EVENT] MODE: VOICE_CALL_IDLE");
+        }
+    }
+}
+
+void a2dp_sink_event_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+    if (event == 0) { // Connection State
+        if (param->conn_stat.state == 2) Serial.println("[STATUS] A2DP: Connected");
+    }
+    else if (event == 1) { // Audio State
+        if (param->audio_stat.state == 2) {
+            isMediaStreaming = true;
+            Serial.println("[EVENT] MODE: MEDIA_STREAMING_STARTED");
+        } else {
+            isMediaStreaming = false;
+            Serial.println("[EVENT] MODE: MEDIA_STREAMING_PAUSED");
+        }
+    }
+}
+
+void setup() {
+    // Robust Serial Init
+    Serial.begin(115200);
+    while(!Serial && millis() < 3000); // Wait for Serial to initialize
+    delay(500); 
+
+    Serial.println("\n\n###########################################");
+    Serial.println("#     INTERCOM SYSTEM INITIALIZING...     #");
+    Serial.println("###########################################");
+
+    // 1. Setup I2S
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
+        .sample_rate = 44100,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 8,
+        .dma_buf_len = 64,
+        .use_apll = false
+    };
+    i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCK_IO,
+        .ws_io_num = I2S_WS_IO,
+        .data_out_num = I2S_DO_IO,
+        .data_in_num = I2S_DI_IO
+    };
+    i2s_set_pin(I2S_NUM, &pin_config);
+
+    // 2. Start Bluetooth
+    Serial.println("[INIT] Booting BT Controller...");
+    if (!SerialBT.begin("esp_intercom")) {
+        Serial.println("[FATAL] BT Hardware Init Failed");
+        while (1);
+    }
+
+    // 3. Set Device Identity
+    esp_bt_cod_t cod;
+    cod.major = 0x04; cod.minor = 0x08; 
+    esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_ALL);
+
+    // 4. Initialize Profiles
+    esp_a2d_register_callback(a2dp_sink_event_cb);
+    esp_a2d_sink_init();
+    esp_a2d_sink_register_data_callback(a2dp_sink_data_cb);
+
+    esp_hf_client_register_callback(hf_client_event_cb);
+    esp_hf_client_init();
+    esp_hf_client_register_data_callback(hf_incoming_data_cb, hf_outgoing_data_cb);
+
+    // 5. Visibility
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    Serial.println("[SUCCESS] System Ready. Awaiting connection...");
+}
+
+void loop() {
+    static unsigned long lastMsg = 0;
+    if (millis() - lastMsg > 5000) {
+        lastMsg = millis();
+        Serial.print("[INFO] Device Name: esp_intercom | State: ");
+        if (isCallActive) Serial.println("VOICE CALL");
+        else if (isMediaStreaming) Serial.println("MEDIA PLAYBACK");
+        else Serial.println("IDLE");
+    }
+}
