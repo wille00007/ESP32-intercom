@@ -1,12 +1,13 @@
 /* * -------------------------------------------------------------------------------
  * PROJECT: Open-Source Pro-Intercom MCU System
- * VERSION: 2.7.0 (Stable Release)
+ * VERSION: 2.8.1 (Stable Release - AVRCP RN Struct Fix)
  * DESCRIPTION: Dual-profile (A2DP Sink & HFP Client) with Full-Duplex I2S Audio
  * HARDWARE: ESP32-WROOM Series (Arduino Core 2.0.17)
  * -------------------------------------------------------------------------------
  */
 
-#include "BluetoothSerial.h"
+#include "esp_bt.h"
+#include "esp_avrc_api.h"
 #include "esp_bt_main.h"
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
@@ -14,8 +15,6 @@
 #include "esp_hf_client_api.h"
 #include "driver/i2s.h"
 #include "nvs_flash.h"
-
-BluetoothSerial SerialBT;
 
 // --- I2S PIN CONFIGURATION ---
 #define I2S_NUM           I2S_NUM_0
@@ -29,92 +28,107 @@ bool isCallActive = false;
 bool isMediaStreaming = false;
 unsigned long transitionStartTime = 0;
 
+// --- VOLUME CONTROL ---
+volatile uint8_t current_volume = 64; // Default volume at ~50%
+
+// Handles volume commands from the phone/PC
+void avrc_tg_event_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
+    esp_avrc_rn_param_t rn_param;
+
+    switch (event) {
+        // 1. The device (Windows/iOS) requests a volume change
+        case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
+            current_volume = param->set_abs_vol.volume;
+            Serial.print("[AVRCP] Volume changed to: ");
+            Serial.println(current_volume);
+
+            // IMPORTANT: Send a CHANGED notification response back to the sender
+            rn_param.volume = current_volume;
+            esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_CHANGED, &rn_param);
+            break;
+
+        // 2. The device connects and registers for volume sync notifications
+        case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT:
+            if (param->reg_ntf.event_id == ESP_AVRC_RN_VOLUME_CHANGE) {
+                Serial.println("[AVRCP] Handshake: Volume sync registered!");
+                
+                // IMPORTANT: Send an INTERIM response with the current volume
+                rn_param.volume = current_volume;
+                esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_INTERIM, &rn_param);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+// Dummy function required by iOS to unlock AVRCP features
+void avrc_ct_event_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param) {}
+
 // --- AUDIO DATA CALLBACKS ---
 
-// Handles voice from the iPhone to the ESP32 (Incoming Call)
 void hf_incoming_data_cb(const uint8_t *data, uint32_t len) {
     size_t bytes_written;
     i2s_write(I2S_NUM, data, len, &bytes_written, portMAX_DELAY);
 }
 
-// Handles voice from the ESP32 Microphone to the iPhone (Outgoing Call)
 uint32_t hf_outgoing_data_cb(uint8_t *data, uint32_t len) {
     size_t bytes_read = 0;
     i2s_read(I2S_NUM, data, len, &bytes_read, portMAX_DELAY);
     return (uint32_t)bytes_read;
 }
 
-// Handles music from the iPhone to the ESP32 (A2DP Sink)
 void a2dp_sink_data_cb(const uint8_t *data, uint32_t len) {
+    static int16_t scaled_data[2048]; 
+    int16_t *pcm_data = (int16_t *)data;
+    uint32_t num_samples = len / 2;
+
+    // Logarithmic volume curve for better human perception
+    float linear_vol = (float)current_volume / 127.0f;
+    float vol_factor = linear_vol * linear_vol * linear_vol; 
+
+    for (uint32_t i = 0; i < num_samples; i++) {
+        scaled_data[i] = (int16_t)(pcm_data[i] * vol_factor);
+    }
+
     size_t bytes_written;
-    i2s_write(I2S_NUM, data, len, &bytes_written, portMAX_DELAY);
+    i2s_write(I2S_NUM, scaled_data, len, &bytes_written, portMAX_DELAY);
 }
 
 // --- EVENT HANDLERS ---
 
 void hf_client_event_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *param) {
-    // Event 0 = Connection Status
     if (event == 0) {
         if (param->conn_stat.state == 1) Serial.println("[STATUS] HFP: Profile Connected");
-    }
-    // Event 2 = Audio State Change (The SCO link)
-    else if (event == 2) { 
-        if (param->audio_stat.state == 2) { // Audio Connected
-            unsigned long latency = millis() - transitionStartTime;
+    } else if (event == 2) { 
+        if (param->audio_stat.state == 2) { 
             isCallActive = true;
-            
-            // Switch I2S to Voice Mode (16kHz Mono)
             i2s_set_clk(I2S_NUM, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
-            
-            Serial.print("[LATENCY] HFP Audio Setup: ");
-            Serial.print(latency);
-            Serial.println(" ms");
             Serial.println("[EVENT] MODE: VOICE_CALL_ACTIVE");
         } else {
             isCallActive = false;
-            transitionStartTime = millis(); // Reset timer for next audio request
-            
-            // Switch I2S back to Music Mode (44.1kHz Stereo)
             i2s_set_clk(I2S_NUM, 44100, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
-            
             Serial.println("[EVENT] MODE: VOICE_CALL_IDLE");
-        }
-    }
-    // Event 3 = Call Indicators (Network/Signal)
-    else if (event == 3) {
-        // status 1 = call is active on the iPhone
-        if (param->call.status == 1) {
-            transitionStartTime = millis(); // Start tracking time until audio opens
-            Serial.println("[DEBUG] HFP: Call signal detected. Preparing audio channel...");
         }
     }
 }
 
 void a2dp_sink_event_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
-    // Event 0 = Connection Status
     if (event == 0) {
         if (param->conn_stat.state == 2) Serial.println("[STATUS] A2DP: Profile Connected");
-    }
-    // Event 1 = Audio State Change
-    else if (event == 1) {
-        if (param->audio_stat.state == 2) { // State Started
-            unsigned long latency = millis() - transitionStartTime;
+    } else if (event == 1) {
+        if (param->audio_stat.state == 2) { 
             isMediaStreaming = true;
-            
-            //Serial.print("[LATENCY] Media Playback Setup: ");
-            //Serial.print(latency);
-            //Serial.println(" ms");
             Serial.println("[EVENT] MODE: MEDIA_STREAMING_STARTED");
         } else {
             isMediaStreaming = false;
-            transitionStartTime = millis(); // Reset timer for accurate Play-trigger measurement
             Serial.println("[EVENT] MODE: MEDIA_STREAMING_PAUSED");
         }
     }
 }
 
 void setup() {
-    // Initialize Serial with a delay to ensure Monitor is ready
     Serial.begin(115200);
     while(!Serial && millis() < 3000);
     delay(500);
@@ -123,14 +137,14 @@ void setup() {
     Serial.println("#     PRO-INTERCOM SYSTEM INITIALIZING    #");
     Serial.println("###########################################");
 
-    // Initialize NVS for Bluetooth Link Key persistence
+    // Initialize Non-Volatile Storage (NVS)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
 
-    // 1. Setup I2S Hardware for Full-Duplex
+    // 1. Setup I2S Audio Hardware
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
         .sample_rate = 44100,
@@ -152,32 +166,57 @@ void setup() {
     };
     i2s_set_pin(I2S_NUM, &pin_config);
 
-    // 2. Start Bluetooth Controller
-    if (!SerialBT.begin("esp_intercom")) {
-        Serial.println("[FATAL] Bluetooth hardware failure.");
+    // 2. ARDUINO-SAFE BLUETOOTH INITIALIZATION
+    if (!btStart()) {
+        Serial.println("[FATAL] Failed to start BT Controller.");
         while (1);
     }
 
-    // 3. Set Device Identity (Audio Headset)
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+        if (esp_bluedroid_init() != ESP_OK) {
+            Serial.println("[FATAL] Failed to init Bluedroid.");
+            while (1);
+        }
+    }
+
+    if (esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_ENABLED) {
+        if (esp_bluedroid_enable() != ESP_OK) {
+            Serial.println("[FATAL] Failed to enable Bluedroid.");
+            while (1);
+        }
+    }
+
+    // 3. Set Device Name and Identity Class
+    esp_bt_dev_set_device_name("esp_intercom");
     esp_bt_cod_t cod;
     cod.major = 0x04; cod.minor = 0x08; 
     esp_bt_gap_set_cod(cod, ESP_BT_SET_COD_ALL);
 
-    // 4. Initialize A2DP (Media)
+    // 4. Initialize Volume Control (AVRCP MUST START BEFORE A2DP!)
+    esp_avrc_ct_init();
+    esp_avrc_ct_register_callback(avrc_ct_event_cb);
+
+    esp_avrc_tg_init();
+    esp_avrc_tg_register_callback(avrc_tg_event_cb);
+    
+    // Announce Absolute Volume support to the OS
+    esp_avrc_rn_evt_cap_mask_t evt_set = {0};
+    esp_avrc_rn_evt_bit_mask_operation(ESP_AVRC_BIT_MASK_OP_SET, &evt_set, ESP_AVRC_RN_VOLUME_CHANGE);
+    esp_avrc_tg_set_rn_evt_cap(&evt_set);
+
+    // 5. Initialize A2DP (Media Playback)
     esp_a2d_register_callback(a2dp_sink_event_cb);
     esp_a2d_sink_init();
     esp_a2d_sink_register_data_callback(a2dp_sink_data_cb);
 
-    // 5. Initialize HFP (Calls/Intercom)
+    // 6. Initialize HFP (Voice Calls/Intercom)
     esp_hf_client_register_callback(hf_client_event_cb);
     esp_hf_client_init();
     esp_hf_client_register_data_callback(hf_incoming_data_cb, hf_outgoing_data_cb);
 
-    // 6. Finalize Discoverability
+    // 7. Finalize Discoverability
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-    Serial.println("[SUCCESS] System ready. Scan for 'esp_intercom' on iPhone.");
-    
-    transitionStartTime = millis(); // Initialize timer
+    Serial.println("[SUCCESS] System ready. Scan for 'esp_intercom' on iPhone or PC.");
 }
 
 void loop() {
