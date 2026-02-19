@@ -1,6 +1,6 @@
 /* * -------------------------------------------------------------------------------
  * PROJECT: Open-Source Pro-Intercom MCU System
- * VERSION: 2.8.1 (Stable Release - AVRCP RN Struct Fix)
+ * VERSION: 2.9.0 (Stable Release - Integer Volume Math Fix)
  * DESCRIPTION: Dual-profile (A2DP Sink & HFP Client) with Full-Duplex I2S Audio
  * HARDWARE: ESP32-WROOM Series (Arduino Core 2.0.17)
  * -------------------------------------------------------------------------------
@@ -29,7 +29,7 @@ bool isMediaStreaming = false;
 unsigned long transitionStartTime = 0;
 
 // --- VOLUME CONTROL ---
-volatile uint8_t current_volume = 64; // Default volume at ~50%
+volatile uint8_t current_volume = 64; // Default volume at ~50% (Range 0-127)
 
 // Handles volume commands from the phone/PC
 void avrc_tg_event_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param) {
@@ -80,20 +80,29 @@ uint32_t hf_outgoing_data_cb(uint8_t *data, uint32_t len) {
 }
 
 void a2dp_sink_data_cb(const uint8_t *data, uint32_t len) {
-    static int16_t scaled_data[2048]; 
+    // 1. Static buffer to prevent stack overflow. Sized for max typical payload.
+    static int16_t scaled_data[4096]; 
+    
     int16_t *pcm_data = (int16_t *)data;
-    uint32_t num_samples = len / 2;
+    uint32_t num_samples = len / 2; // 16-bit audio = 2 bytes per sample
 
-    // Logarithmic volume curve for better human perception
-    float linear_vol = (float)current_volume / 127.0f;
-    float vol_factor = linear_vol * linear_vol * linear_vol; 
+    // Safety check to prevent writing outside the array bounds
+    if (num_samples > 4096) num_samples = 4096;
+
+    // 2. FAST INTEGER MATH FOR VOLUME CONTROL
+    // Square the volume (0-16129) to create a logarithmic curve for human hearing
+    uint32_t vol_multiplier = current_volume * current_volume;
 
     for (uint32_t i = 0; i < num_samples; i++) {
-        scaled_data[i] = (int16_t)(pcm_data[i] * vol_factor);
+        int32_t sample = pcm_data[i]; // Read the original audio sample
+        
+        // Multiply by volume and divide by the max squared value (127 * 127 = 16129)
+        scaled_data[i] = (int16_t)((sample * vol_multiplier) / 16129);
     }
 
     size_t bytes_written;
-    i2s_write(I2S_NUM, scaled_data, len, &bytes_written, portMAX_DELAY);
+    // 3. Send the ATTENUATED audio to the I2S amplifier
+    i2s_write(I2S_NUM, scaled_data, num_samples * 2, &bytes_written, portMAX_DELAY);
 }
 
 // --- EVENT HANDLERS ---
